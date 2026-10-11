@@ -1,44 +1,21 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { useAuth } from '../context/AuthContext';
 import CourseForm from '../components/CourseForm';
-
-// Initial default courses for local preview & offline testing
-const DEFAULT_COURSES = [
-  {
-    id: 1,
-    title: 'Introduction to Web Development',
-    description: 'Learn HTML, CSS, and modern JavaScript to build interactive web applications from scratch.',
-    instructor: 'Prof. Alex Smith',
-    duration: '4 Weeks',
-    price: 499,
-  },
-  {
-    id: 2,
-    title: 'Full Stack MERN Architecture',
-    description: 'Master MongoDB, Express.js, React, and Node.js with real-world full stack project implementations.',
-    instructor: 'Dr. Sarah Johnson',
-    duration: '8 Weeks',
-    price: 999,
-  },
-  {
-    id: 3,
-    title: 'Data Structures and Algorithms in Python',
-    description: 'Fundamental algorithmic problems, Big-O analysis, sorting, trees, and dynamic programming.',
-    instructor: 'David Lee',
-    duration: '6 Weeks',
-    price: 750,
-  },
-];
-
-const API_BASE_URL = 'http://localhost:5000/api';
 
 /**
  * AdminDashboard Component
  * Central admin interface for managing course catalog, viewing stats, and performing CRUD operations.
+ * Connected directly to backend API with JWT Authorization and MongoDB _id handling.
  */
 function AdminDashboard() {
-  // Course data state
-  const [courses, setCourses] = useState(DEFAULT_COURSES);
+  const { token, API_BASE_URL: authApiUrl } = useAuth();
+  const API_BASE_URL = authApiUrl || import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
+
+  // Course data state (initialized empty — connects to actual database)
+  const [courses, setCourses] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [fetchError, setFetchError] = useState('');
 
   // Modal & form management states
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -49,54 +26,74 @@ function AdminDashboard() {
   // User feedback message state (success / error notifications)
   const [feedback, setFeedback] = useState(null);
 
-  // Backend API status tracking
-  const [backendStatus, setBackendStatus] = useState('checking'); // 'connected', 'limited', 'offline'
+  // Helper to build auth headers
+  const getAuthHeaders = useCallback(() => {
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, [token]);
 
-  // Attempt to sync with backend on mount
+  // Manual fetch function for retries or post-mutation sync
+  const fetchCourses = useCallback(() => {
+    setIsLoading(true);
+    setFetchError('');
+    return axios
+      .get(`${API_BASE_URL}/courses`, {
+        headers: getAuthHeaders(),
+      })
+      .then((res) => {
+        if (res.data?.success && Array.isArray(res.data.courses)) {
+          setCourses(res.data.courses);
+        } else if (Array.isArray(res.data)) {
+          setCourses(res.data);
+        } else {
+          setCourses([]);
+        }
+      })
+      .catch((err) => {
+        const message =
+          err.response?.data?.message || 'Failed to load courses from backend server.';
+        setFetchError(message);
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, [API_BASE_URL, getAuthHeaders]);
+
+  // Sync with backend on mount
   useEffect(() => {
     let isMounted = true;
 
-    const checkBackendAndFetchCourses = async () => {
-      try {
-        // First check backend health
-        const healthRes = await axios.get(`${API_BASE_URL}/health`).catch(() => null);
-
-        if (healthRes && healthRes.data && healthRes.data.success) {
-          // Backend server is running. Now check if course CRUD endpoints exist:
-          try {
-            const courseRes = await axios.get(`${API_BASE_URL}/courses`);
-            if (isMounted && courseRes.data && Array.isArray(courseRes.data)) {
-              setCourses(courseRes.data);
-              setBackendStatus('connected');
-              return;
-            }
-          } catch {
-            // /api/courses not yet implemented in server.js
-            if (isMounted) {
-              setBackendStatus('limited');
-            }
-            return;
-          }
+    axios
+      .get(`${API_BASE_URL}/courses`, {
+        headers: getAuthHeaders(),
+      })
+      .then((res) => {
+        if (!isMounted) return;
+        if (res.data?.success && Array.isArray(res.data.courses)) {
+          setCourses(res.data.courses);
+        } else if (Array.isArray(res.data)) {
+          setCourses(res.data);
+        } else {
+          setCourses([]);
         }
-
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        const message =
+          err.response?.data?.message || 'Failed to load courses from backend server.';
+        setFetchError(message);
+      })
+      .finally(() => {
         if (isMounted) {
-          setBackendStatus('offline');
+          setIsLoading(false);
         }
-      } catch {
-        if (isMounted) {
-          setBackendStatus('offline');
-        }
-      }
-    };
-
-    checkBackendAndFetchCourses();
+      });
 
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [API_BASE_URL, getAuthHeaders]);
 
-  // Summary statistics calculated accurately from current courses state
+  // Summary statistics calculated from current live courses
   const totalCourses = courses.length;
   const uniqueInstructors = new Set(
     courses.map((c) => (c.instructor ? c.instructor.trim() : '')).filter(Boolean)
@@ -127,7 +124,7 @@ function AdminDashboard() {
     setFormServerError('');
   };
 
-  // Handle course form submission (both Add and Edit)
+  // Handle course form submission (both Add and Edit) via real backend endpoints
   const handleSaveCourse = async (courseData) => {
     setIsSubmitting(true);
     setFormServerError('');
@@ -135,77 +132,74 @@ function AdminDashboard() {
     try {
       if (editingCourse) {
         // ==========================================
-        // UPDATE EXISTING COURSE
+        // UPDATE EXISTING COURSE (PUT /api/courses/:id)
         // ==========================================
-        let updatedCourse = {
-          ...editingCourse,
-          ...courseData,
-        };
+        const courseId = editingCourse._id || editingCourse.id;
 
-        // If backend is connected, call PUT /api/courses/:id
-        if (backendStatus === 'connected') {
-          try {
-            const res = await axios.put(`${API_BASE_URL}/courses/${editingCourse.id}`, courseData);
-            if (res.data) {
-              updatedCourse = { ...updatedCourse, ...res.data };
-            }
-          } catch (apiErr) {
-            // Keep modal open and report API error without losing form data
-            const message =
-              apiErr.response?.data?.message || 'Failed to update course on the backend.';
-            setFormServerError(message);
-            setIsSubmitting(false);
-            return;
-          }
+        try {
+          const res = await axios.put(
+            `${API_BASE_URL}/courses/${courseId}`,
+            courseData,
+            { headers: getAuthHeaders() }
+          );
+
+          const updatedCourse = res.data?.course || res.data || {
+            ...editingCourse,
+            ...courseData,
+          };
+
+          // Update local state with modified course
+          setCourses((prev) =>
+            prev.map((c) => ((c._id || c.id) === courseId ? { ...c, ...updatedCourse } : c))
+          );
+
+          setFeedback({
+            type: 'success',
+            message: `Course "${updatedCourse.title || courseData.title}" updated successfully!`,
+          });
+
+          setIsModalOpen(false);
+          setEditingCourse(null);
+        } catch (apiErr) {
+          // Keep modal open and report API error without losing form data
+          const message =
+            apiErr.response?.data?.message || 'Failed to update course on the backend.';
+          setFormServerError(message);
         }
-
-        // Update local React state
-        setCourses((prev) =>
-          prev.map((c) => (c.id === editingCourse.id ? updatedCourse : c))
-        );
-
-        setFeedback({
-          type: 'success',
-          message: `Course "${updatedCourse.title}" updated successfully!`,
-        });
       } else {
         // ==========================================
-        // CREATE NEW COURSE
+        // CREATE NEW COURSE (POST /api/courses)
         // ==========================================
-        let newCourse = {
-          id: Date.now(),
-          ...courseData,
-        };
+        try {
+          const res = await axios.post(
+            `${API_BASE_URL}/courses`,
+            courseData,
+            { headers: getAuthHeaders() }
+          );
 
-        // If backend is connected, call POST /api/courses
-        if (backendStatus === 'connected') {
-          try {
-            const res = await axios.post(`${API_BASE_URL}/courses`, courseData);
-            if (res.data && res.data.id) {
-              newCourse = res.data;
-            }
-          } catch (apiErr) {
-            // Keep modal open and report API error without losing form data
-            const message =
-              apiErr.response?.data?.message || 'Failed to create course on the backend.';
-            setFormServerError(message);
-            setIsSubmitting(false);
-            return;
+          const newCourse = res.data?.course || res.data;
+
+          if (newCourse) {
+            setCourses((prev) => [newCourse, ...prev]);
+          } else {
+            // Refetch to sync state with database
+            await fetchCourses();
           }
+
+          setFeedback({
+            type: 'success',
+            message: `Course "${courseData.title}" added successfully!`,
+          });
+
+          setIsModalOpen(false);
+          setEditingCourse(null);
+        } catch (apiErr) {
+          // Keep modal open and report API error without losing form data
+          const message =
+            apiErr.response?.data?.message || 'Failed to create course on the backend.';
+          setFormServerError(message);
         }
-
-        // Add to local React state
-        setCourses((prev) => [newCourse, ...prev]);
-
-        setFeedback({
-          type: 'success',
-          message: `Course "${newCourse.title}" added successfully!`,
-        });
       }
-
-      // Successful save: close modal and reset editing course
-      setIsModalOpen(false);
-      setEditingCourse(null);
     } catch {
       setFormServerError('An unexpected error occurred while saving.');
     } finally {
@@ -213,31 +207,26 @@ function AdminDashboard() {
     }
   };
 
-  // Delete course action
+  // Delete course action connected to real backend DELETE endpoint
   const handleDeleteCourse = async (courseId, courseTitle) => {
     const confirmed = window.confirm(`Are you sure you want to delete "${courseTitle}"?`);
     if (!confirmed) return;
 
     try {
-      if (backendStatus === 'connected') {
-        try {
-          await axios.delete(`${API_BASE_URL}/courses/${courseId}`);
-        } catch (apiErr) {
-          const message =
-            apiErr.response?.data?.message || 'Failed to delete course on the server.';
-          setFeedback({ type: 'error', message });
-          return;
-        }
-      }
+      await axios.delete(`${API_BASE_URL}/courses/${courseId}`, {
+        headers: getAuthHeaders(),
+      });
 
-      // Update state by filtering out deleted course
-      setCourses((prev) => prev.filter((c) => c.id !== courseId));
+      // Update state only on successful deletion
+      setCourses((prev) => prev.filter((c) => (c._id || c.id) !== courseId));
       setFeedback({
         type: 'success',
         message: `Course "${courseTitle}" deleted successfully!`,
       });
-    } catch {
-      setFeedback({ type: 'error', message: 'Failed to delete course.' });
+    } catch (apiErr) {
+      const message =
+        apiErr.response?.data?.message || 'Failed to delete course on the server.';
+      setFeedback({ type: 'error', message });
     }
   };
 
@@ -264,15 +253,24 @@ function AdminDashboard() {
 
       {/* Backend API Integration Notice */}
       <div className="api-status-banner">
-        <span className="status-indicator-dot"></span>
+        <span
+          className="status-indicator-dot"
+          style={{
+            backgroundColor: isLoading
+              ? '#f59e0b'
+              : fetchError
+              ? '#ef4444'
+              : '#10b981',
+          }}
+        ></span>
         <span>
           Backend Status:{' '}
           <strong>
-            {backendStatus === 'connected'
-              ? 'Connected (Live API)'
-              : backendStatus === 'limited'
-              ? 'Server Running (/api/health active; /api/courses pending in backend)'
-              : 'Local State Mode (Backend offline)'}
+            {isLoading
+              ? 'Connecting to backend...'
+              : fetchError
+              ? `Connection Issue: ${fetchError}`
+              : `Connected (Live API at ${API_BASE_URL})`}
           </strong>
         </span>
       </div>
@@ -308,9 +306,28 @@ function AdminDashboard() {
         </div>
       </section>
 
-      {/* Courses Table / Empty State */}
+      {/* Courses Table / Empty State / Loading State */}
       <section className="courses-section" aria-label="Course list">
-        {courses.length === 0 ? (
+        {isLoading ? (
+          <div className="auth-loading-state">
+            <div className="spinner"></div>
+            <p>Loading course catalog from database...</p>
+          </div>
+        ) : fetchError && courses.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon">⚠️</div>
+            <h3>Unable to load courses</h3>
+            <p>{fetchError}</p>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={fetchCourses}
+              style={{ marginTop: '12px' }}
+            >
+              Retry Connection
+            </button>
+          </div>
+        ) : courses.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state-icon">📚</div>
             <h3>No courses found</h3>
@@ -336,41 +353,44 @@ function AdminDashboard() {
                 </tr>
               </thead>
               <tbody>
-                {courses.map((course) => (
-                  <tr key={course.id}>
-                    <td className="col-title">
-                      <div className="course-title-cell">
-                        <strong className="course-title-text">{course.title}</strong>
-                        {course.description && (
-                          <p className="course-description-preview">{course.description}</p>
-                        )}
-                      </div>
-                    </td>
-                    <td className="col-instructor">{course.instructor}</td>
-                    <td className="col-duration">
-                      <span className="duration-badge">{course.duration}</span>
-                    </td>
-                    <td className="col-price">₹{course.price}</td>
-                    <td className="col-actions">
-                      <div className="action-buttons">
-                        <button
-                          type="button"
-                          className="btn btn-edit"
-                          onClick={() => handleOpenEditModal(course)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-delete"
-                          onClick={() => handleDeleteCourse(course.id, course.title)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {courses.map((course) => {
+                  const courseId = course._id || course.id;
+                  return (
+                    <tr key={courseId}>
+                      <td className="col-title">
+                        <div className="course-title-cell">
+                          <strong className="course-title-text">{course.title}</strong>
+                          {course.description && (
+                            <p className="course-description-preview">{course.description}</p>
+                          )}
+                        </div>
+                      </td>
+                      <td className="col-instructor">{course.instructor}</td>
+                      <td className="col-duration">
+                        <span className="duration-badge">{course.duration}</span>
+                      </td>
+                      <td className="col-price">₹{course.price}</td>
+                      <td className="col-actions">
+                        <div className="action-buttons">
+                          <button
+                            type="button"
+                            className="btn btn-edit"
+                            onClick={() => handleOpenEditModal(course)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-delete"
+                            onClick={() => handleDeleteCourse(courseId, course.title)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -397,7 +417,7 @@ function AdminDashboard() {
 
             {/* CourseForm component manages controlled inputs and validation */}
             <CourseForm
-              key={editingCourse ? `edit-${editingCourse.id}` : 'add-new'}
+              key={editingCourse ? `edit-${editingCourse._id || editingCourse.id}` : 'add-new'}
               initialCourse={editingCourse}
               onSubmit={handleSaveCourse}
               onCancel={handleCloseModal}

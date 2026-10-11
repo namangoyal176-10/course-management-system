@@ -11,8 +11,8 @@ import { useState } from 'react';
  * - serverError: optional string with an error message from the backend
  */
 function CourseForm({ initialCourse, onSubmit, onCancel, isSubmitting = false, serverError = '' }) {
-  // Check if we are editing an existing course
-  const isEditMode = Boolean(initialCourse && initialCourse.id !== undefined);
+  // Check if we are editing an existing course (supports MongoDB _id or id)
+  const isEditMode = Boolean(initialCourse && (initialCourse._id !== undefined || initialCourse.id !== undefined));
 
   // Controlled form state for all five required fields
   const [title, setTitle] = useState(initialCourse ? initialCourse.title || '' : '');
